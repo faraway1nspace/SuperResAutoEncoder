@@ -2,3 +2,5 @@
 *~
 src/models_trained/v1/*
 src/py_superresautoencoder_play_v0.py
+src/\#.*
+src/*~
