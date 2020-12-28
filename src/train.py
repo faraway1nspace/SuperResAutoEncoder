@@ -239,15 +239,15 @@ def train(params_dict,
             pixel_loss = mse_loss(by_full, out)
             # content loss (vgg deeper features
             #content_loss = mse_loss(bx_comp, out_downsampled)
-            content_loss = mse_loss(features_style_fullsize.relu2_2, features_style_reconstruction.relu2_2)
+            perceptual_loss = mse_loss(features_style_fullsize.relu2_2, features_style_reconstruction.relu2_2) # 
             
             #bstyle_loss.backward() # takes a long time
             rwts_pixel = wts['pixel']*(random.random()<0.95);
             #rwts_content = wts['content']*(random.random()<0.95)
-            (rwts_pixel*pixel_loss + wts['style']*bstyle_loss + wts['content']*content_loss).backward()
+            (rwts_pixel*pixel_loss + wts['style']*bstyle_loss + wts['content']*perceptual_loss).backward()
             optimizer.step()
             if bitem % 10 ==0:
-                print("E%d; STEP%d; style:%0.6f; content:%0.3f; pix:%0.3f" % (epoch, bitem, bstyle_loss.item(), content_loss.item(), pixel_loss.item()))
+                print("E%d; STEP%d; style:%0.6f; content:%0.3f; pix:%0.3f" % (epoch, bitem, bstyle_loss.item(), perceptual_loss.item(), pixel_loss.item()))
                 if not sleep is None:
                     time.sleep(sleep)
           
@@ -259,7 +259,7 @@ def train(params_dict,
                 'model_state_dict': net2.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'style_loss':bstyle_loss.item(),
-                'content_loss':content_loss.item(),
+                'content_loss':perceptual_loss.item(),
                 'pixel_loss':pixel_loss.item(),
                 'lr':lr,
                 'weights':wts,
