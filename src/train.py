@@ -180,7 +180,7 @@ def train(params_dict,
     net2 = TransformerNet4(params).to(device)
     optimizer = torch.optim.Adam(net2.parameters(),lr = lr)
     
-    save_dir = "models_trained/v2/";
+    #save_dir = "models_trained/v2/";
     if not os.path.isdir(save_dir):
         os.mkdir(save_dir)
     
