@@ -248,6 +248,10 @@ def train(params_dict,
             
             # compress the image to 64x64  (serves as the input image
             bx_comp = db_loader.downscale_fullsize_target_to_small_input(target_images = by_full)
+            if do_cuda:
+                bx_comp = bx_comp.to(device)
+                by_full = by_full.to(device)
+            
             optimizer.zero_grad()
             # reconstruct image
             out, out_downsampled = net2(bx_comp)
