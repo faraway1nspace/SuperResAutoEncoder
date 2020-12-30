@@ -148,6 +148,7 @@ def style_lossf(gram_style_fullsize, gram_style_reconstruction):
 def train(params_dict,
           path_db,
           save_dir,
+          model_type = None, # either "TransformerNet4" or "NetResidUpsample"
           do_cuda = None,
           do_reload=None,
           n_epochs = None,
@@ -155,10 +156,26 @@ def train(params_dict,
           lr = None,
           wts = None,
           path_to_reload_model = None,
-          sleep=None):
+          sleep=None,
+          import_dir = None):
+    
+    if model_type is None:
+        model_type = "TransformerNet4"
     
     if do_cuda is None:
         do_cuda = False
+    
+    if n_epochs is None:
+        n_epochs = 10
+    
+    if bs is None:
+        bs = 3
+    
+    if lr is None:
+        lr = 0.001
+    
+    if wts is None:
+        wts = {'style':1e10, 'pixel':512.0**-0.5, 'content':1e5}
     
     mse_loss = torch.nn.MSELoss()
     
@@ -174,10 +191,18 @@ def train(params_dict,
     params = HyperParams(params_dict)
     
     device = torch.device("cuda" if do_cuda else "cpu")
-    
+        
+    #initialize the VGG pre-trained model for the perceptual losses
     vgg = Vgg16(requires_grad=False).to(device)
     
-    net2 = TransformerNet4(params).to(device)
+    # initialize the model
+    if model_type == "TransformerNet4":
+        net2 = TransformerNet4(params).to(device)
+    elif model_type == "NetResidUpsample":
+        net2 = NetResidUpsample(params).to(device)
+    else:
+        net2 = TransformerNet4(params).to(device)
+    
     optimizer = torch.optim.Adam(net2.parameters(),lr = lr)
     
     #save_dir = "models_trained/v2/";
@@ -185,25 +210,25 @@ def train(params_dict,
         os.mkdir(save_dir)
     
     target_size = 512
-    
-    if n_epochs is None:
-        n_epochs = 10
-    
-    if bs is None:
-        bs = 3
-    
-    if lr is None:
-        lr = 0.001
-    
-    if wts is None:
-        wts = {'style':1e10, 'pixel':512.0**-0.5, 'content':1e5}
-    
+        
     epoch = -1
     
     if do_reload is None:
         do_reload = False
     
     if do_reload:
+        # check if there is a saved json file with the path to the latest model
+        path_to_lastest_model_json = os.path.join(save_dir, "latest_model.json")
+        if os.path.isfile(path_to_lastest_model_json):
+            with open(path_to_lastest_model_json,'r') as jcon:
+                path_to_reload_model_from_json = json.load(jcon)['path_to_latest_model']
+            
+            if (not path_to_reload_model is None):
+                if (path_to_reload_model_from_json != path_to_reload_model):
+                    print("The reload model (%s) is different from the latest model %s; defaulting to the latest saved" % (path_to_reload_model,path_to_reload_model_from_json))
+            
+            path_to_reload_model = path_to_reload_model_from_json
+        
         if os.path.isfile(path_to_reload_model):
             print("reloading model %s" % path_to_reload_model)
             previous_model_state = torch.load(path_to_reload_model)
@@ -212,6 +237,8 @@ def train(params_dict,
             net2.load_state_dict(previous_model_state['model_state_dict'])
             optimizer = torch.optim.Adam(net2.parameters(),lr = lr)
             optimizer.load_state_dict(previous_model_state['optimizer_state_dict'])
+        else:
+            print("STARTING FRESH MODEL AT 0")
     
     while epoch < n_epochs:
         epoch+=1
@@ -227,7 +254,7 @@ def train(params_dict,
             # VGG features
             features_style_fullsize = vgg(by_full)
             features_style_reconstruction = vgg(out)
-        
+            
             # gram matrices for style loss
             gram_style_fullsize = [gram_matrix(y) for y in features_style_fullsize]
             # style of the reconstruction
@@ -250,7 +277,7 @@ def train(params_dict,
                 print("E%d; STEP%d; style:%0.6f; content:%0.3f; pix:%0.3f" % (epoch, bitem, bstyle_loss.item(), perceptual_loss.item(), pixel_loss.item()))
                 if not sleep is None:
                     time.sleep(sleep)
-          
+        
         if True:
             print("saving model and making a dummy image")
             path_to_model = "%sstyletransfer_v1_e%d.model" % (save_dir, epoch)
@@ -265,6 +292,11 @@ def train(params_dict,
                 'weights':wts,
                 'bs':bs,
                 'params_dict':params_dict},path_to_model)
+            
+            # save the path to the latest model
+            path_to_lastest_model_json = os.path.join(os.path.split(path_to_model)[0],"latest_model.json")
+            with open(path_to_lastest_model_json,'w') as jcon:
+                json.dump({'path_to_latest_model':path_to_model}, jcon)
             
             # plot images
             save_visualization(by_full, out, vis_path=save_dir, suffix = "E%d" % epoch)

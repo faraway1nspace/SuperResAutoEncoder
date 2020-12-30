@@ -211,6 +211,80 @@ class TransformerNet4(torch.nn.Module):
         #out_downsampled = torch.nn.functional.interpolate(out, mode=self.downsample_mode, scale_factor=self.downsample_factor)
         return out, None
 
+    
+class NetResidUpsample(torch.nn.Module):
+    """ blends upsampling and res blocks to add features and depth at same time"""
+    def __init__(self, params):
+        super(NetResidUpsample, self).__init__()
+        
+        # Initial convolution layers
+        self.conv1 = ConvLayer(3, 32, kernel_size = params.conv1_kernel_size1, stride=2, extra_padding = params.conv1_extra_padding)
+        self.in1 = torch.nn.InstanceNorm2d(32, affine=True) # out 32 x 32
+        self.conv2 = ConvLayer(32, 64, kernel_size=params.conv2_kernel_size1, stride=2) # out 16 x 16
+        self.in2 = torch.nn.InstanceNorm2d(64, affine=True)
+        self.conv3 = ConvLayer(64, params.conv3_outchannels-3, kernel_size=3, stride=2) # out 8x8
+        self.in3 = torch.nn.InstanceNorm2d(params.conv3_outchannels-3, affine=True)
+        
+        # zeroth upsample back to 64x64 -> concatenate with original
+        self.res1 = ResidualBlock(params.conv3_outchannels)
+        
+        # first upsample : up to 128 (notice -3 because of concatenation
+        self.deconv1 = UpsampleConvLayer(params.deconv1_inchannel_size, params.deconv1_outchannel_size-3, kernel_size=3, stride=1, upsample=2)
+        self.in4 = torch.nn.InstanceNorm2d(params.deconv1_outchannel_size-3, affine=True)
+        self.res2 = ResidualBlock(params.deconv1_outchannel_size)
+        
+        # 2nd upsample : up to 256
+        self.deconv2 = UpsampleConvLayer(params.deconv2_inchannel_size, params.deconv2_outchannel_size, kernel_size=3, stride=1, upsample=2)
+        self.in5 = torch.nn.InstanceNorm2d(params.deconv2_outchannel_size, affine=True)
+        self.res3 = ResidualBlock(params.deconv2_outchannel_size) # receives upsampled X
+        
+        # 2nd upsample : up to 512
+        self.deconv3 = UpsampleConvLayer(params.deconv3_inchannel_size, params.deconv3_outchannel_size, kernel_size=params.deconv3_kernel_size, stride=1, upsample=2)
+        self.in6 = torch.nn.InstanceNorm2d(params.deconv3_outchannel_size, affine=True)
+        self.res4 = ResidualBlock(params.deconv3_outchannel_size)
+        
+        # final out
+        self.deconv_out = ConvLayer(params.deconv3_outchannel_size, 3, kernel_size=9, stride=1)
+        
+        # Non-linearities
+        self.relu = torch.nn.ReLU()
+    
+    def forward(self, X):
+        
+        # down-convolution 1 # out 32x32
+        y = self.relu(self.in1(self.conv1(X)))
+        
+        # down-convolution 2 # out 16x16
+        y = self.relu(self.in2(self.conv2(y)))
+        
+        # down-convolution 3 # out 8x8
+        y_8 = self.relu(self.in3(self.conv3(y)))
+        
+        # zeroth upsample back to original
+        y_64 = torch.nn.functional.interpolate(y_8, mode='nearest', scale_factor=8) # back up to 64
+        # concatenate convolutions and original
+        y_cat = torch.cat([y_64, X], axis=1) #
+        y_64 = self.res1(y_cat)
+        
+        # upsample: upto 128
+        y_128 = self.relu(self.in4(self.deconv1(y_64))) # 64->182
+        X_128 = torch.nn.functional.interpolate(X, mode='nearest', scale_factor=2) # scale original upto 128
+        y_cat128 = torch.cat([y_128, X_128], axis=1)
+        y = self.res2(y_cat128)
+        
+        # upsample: upto 256
+        y = self.relu(self.in5(self.deconv2(y)))
+        y = self.res3(y)
+        
+        # upsample: upto 512
+        y = self.relu(self.in6(self.deconv3(y)))
+        y = self.res4(y)
+        
+        # final convolution
+        out = self.deconv_out(y)
+        
+        return out, None
+
 class ConvLayer(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, extra_padding=None):
         super(ConvLayer, self).__init__()
@@ -225,28 +299,27 @@ class ConvLayer(torch.nn.Module):
         out = self.conv2d(out)
         return out
 
-
 class ResidualBlock(torch.nn.Module):
     """ResidualBlock
     introduced in: https://arxiv.org/abs/1512.03385
     recommended architecture: http://torch.ch/blog/2016/02/04/resnets.html
     """
-
-    def __init__(self, channels):
+    def __init__(self, channels, kernel_size = None):
         super(ResidualBlock, self).__init__()
-        self.conv1 = ConvLayer(channels, channels, kernel_size=3, stride=1)
+        if kernel_size is None:
+            kernel_size = 3
+        self.conv1 = ConvLayer(channels, channels, kernel_size=kernel_size, stride=1)
         self.in1 = torch.nn.InstanceNorm2d(channels, affine=True)
-        self.conv2 = ConvLayer(channels, channels, kernel_size=3, stride=1)
+        self.conv2 = ConvLayer(channels, channels, kernel_size=kernel_size, stride=1)
         self.in2 = torch.nn.InstanceNorm2d(channels, affine=True)
         self.relu = torch.nn.ReLU()
-
+    
     def forward(self, x):
         residual = x
         out = self.relu(self.in1(self.conv1(x)))
         out = self.in2(self.conv2(out))
         out = out + residual
         return out
-
 
 class UpsampleConvLayer(torch.nn.Module):
     """UpsampleConvLayer
