@@ -157,7 +157,8 @@ def train(params_dict,
           wts = None,
           path_to_reload_model = None,
           sleep=None,
-          import_dir = None):
+          import_dir = None,
+          save_model_every_X_iterations = None):
     
     if model_type is None:
         model_type = "TransformerNet4"
@@ -176,6 +177,9 @@ def train(params_dict,
     
     if wts is None:
         wts = {'style':1e10, 'pixel':512.0**-0.5, 'content':1e5}
+    
+    if save_model_every_X_iterations is None:
+        save_model_every_X_iterations = 100
     
     mse_loss = torch.nn.MSELoss()
     
@@ -277,6 +281,30 @@ def train(params_dict,
             #rwts_content = wts['content']*(random.random()<0.95)
             (rwts_pixel*pixel_loss + wts['style']*bstyle_loss + wts['content']*perceptual_loss).backward()
             optimizer.step()
+            
+            if bitem % save_model_every_X_iterations == 0:
+                print("saving model and making a dummy image")
+                path_to_model = "%sstyletransfer_v1_e%d.model" % (save_dir, epoch)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': net2.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'style_loss':bstyle_loss.item(),
+                    'content_loss':perceptual_loss.item(),
+                    'pixel_loss':pixel_loss.item(),
+                    'lr':lr,
+                    'weights':wts,
+                    'bs':bs,
+                    'params_dict':params_dict},path_to_model)
+                
+                # save the path to the latest model
+                path_to_lastest_model_json = os.path.join(os.path.split(path_to_model)[0],"latest_model.json")
+                with open(path_to_lastest_model_json,'w') as jcon:
+                    json.dump({'path_to_latest_model':path_to_model}, jcon)
+                
+                # plot images
+                save_visualization(by_full, out, vis_path=save_dir, suffix = "E%d" % epoch)
+            
             if bitem % 10 ==0:
                 print("E%d; STEP%d; style:%0.6f; content:%0.3f; pix:%0.3f" % (epoch, bitem, bstyle_loss.item(), perceptual_loss.item(), pixel_loss.item()))
                 if not sleep is None:
@@ -307,4 +335,3 @@ def train(params_dict,
             if not sleep is None:
                 time.sleep(5*sleep)
 
-    
