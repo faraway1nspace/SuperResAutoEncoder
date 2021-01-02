@@ -5,12 +5,13 @@ import json
 import pickle as pkl
 
 import torch
+from torch.autograd import Variable
 import torchvision.transforms as Transforms
 import albumentations as A
 import cv2
 import random
 
-from utils.utils import rebase_path
+from utils.utils import rebase_path, make_edge_sensitive_weights_for_pixel_loss, mse_loss_weighted
 from utils.visualize_image import save_visualization
 from utils.image_transform import pil_loader, ToTensorV2
 from attrib_dataset import AttribDataset
@@ -97,8 +98,11 @@ class DataLoaderTransformer:
             if size_compressed_input is None:
                 raise AttributeError("'size_compressed_input' is None; must set to ~64")
         # change to Numpy
-        #target_image = target_image.detach().numpy()
-        return Transforms.Resize(size_compressed_input, interpolation=2)(target_images)
+        target_image = Transforms.Resize(size_compressed_input, interpolation=2)(target_images)
+        target_image = target_image.detach().numpy()
+        target_image = torch.FloatTensor(target_image)
+        target_image = Variable(target_image)
+        return target_image
 
 class AlbumentationsTransformations(object):
     """ Wrapper class used to re-initialize a Albumentations Compose, conditional on changing parameters of 'size' """
@@ -137,11 +141,11 @@ def gram_matrix(y):
     gram = features.bmm(features_t) / (ch * h * w)
     return gram
 
-def style_lossf(gram_style_fullsize, gram_style_reconstruction):
+def style_lossf(gram_style_reconstruction, gram_style_fullsize):   #
     style_loss = 0.
     # loop through vgg features
     for gm_o, gm_r in zip(gram_style_fullsize, gram_style_reconstruction):
-        style_loss += mse_loss(gm_o, gm_r)
+        style_loss += mse_loss(gm_r, gm_o)
     
     return style_loss 
 
@@ -268,7 +272,7 @@ def train(params_dict,
             # style of the reconstruction
             gram_style_reconstruction = [gram_matrix(y) for y in features_style_reconstruction]
             # style loss
-            bstyle_loss = style_lossf(gram_style_fullsize, gram_style_reconstruction)
+            bstyle_loss = style_lossf(gram_style_reconstruction, gram_style_fullsize)
             
             # pixel loss
             pixel_loss = mse_loss(by_full, out)
@@ -461,28 +465,28 @@ def train_4_losses(params_dict,
                 by_full = by_full.to(device)
             
             optimizer.zero_grad()
-            # reconstruct image
+              
+            # get reconstructed image (out) and a downsampled version (out_downsampled)
             out, out_downsampled = net2(bx_comp)
-            # downscale
             
-            # VGG features
+            # VGG features: original (by_full) and reconstruction (out)
             features_style_fullsize = vgg(by_full)
             features_style_reconstruction = vgg(out)
             
-            # gram matrices for style loss
+            # gram matrices for style loss: style-features for original
             gram_style_fullsize = [gram_matrix(y) for y in features_style_fullsize]
             # style of the reconstruction
             gram_style_reconstruction = [gram_matrix(y) for y in features_style_reconstruction]
             # style loss
-            bstyle_loss = style_lossf(gram_style_fullsize, gram_style_reconstruction)
+            bstyle_loss = style_lossf(gram_style_reconstruction, gram_style_fullsize)
             
             # pixel loss (native resolution)
-            pixel_loss = mse_loss(by_full, out)
-            # pixel loss at downscaled resolution
-            downscale_loss = mse_loss(by_comp, out_downsampled)
+            pixel_loss = mse_loss(out, by_full)
+            # pixel loss (downscaled resolution)
+            downscale_loss = mse_loss(out_downsampled, by_comp)
             
             # perceptual loss (vgg)
-            perceptual_loss = mse_loss(features_style_fullsize.relu2_2, features_style_reconstruction.relu2_2) # 
+            perceptual_loss = mse_loss(features_style_reconstruction.relu2_2, features_style_fullsize.relu2_2)
             
             rwts_pixel = wts['pixel']*(random.random()<0.95);
             
@@ -544,4 +548,219 @@ def train_4_losses(params_dict,
             if not sleep is None:
                 time.sleep(5*sleep)
 
+def train_4_losses_weighted_pix(params_dict,
+                   path_db,
+                   save_dir,
+                   target_size = None, # size of the input images and the reconstructed imagesa
+                   model_type = None, # either "TransformerNet4" for images of size 512, or 'ResidUpscale256' if the image is 256px
+                   do_cuda = None,
+                   do_reload=None,
+                   n_epochs = None,
+                   bs = None,
+                   lr = None,
+                   wts = None,
+                   path_to_reload_model = None,
+                   sleep=None,
+                   import_dir = None,
+                   save_model_every_X_iterations = None,
+                   alpha = None,
+                   alpha_thres = None):
+    """ 
+    this version of train uses four types of losses:
+    - pixel loss at the native resolution (e.g. 512 x 512)
+    - downscaled pixel-loss at 1/2 the native resolution
+    - perceptual loss (using VGG)
+    - style-loss (using VGG)
+    - 
+    """
+    if target_size is None:
+        target_size = 256
+    
+    if model_type is None:
+        model_type = "ResidUpscale256"
+    
+    if do_cuda is None:
+        do_cuda = False
+    
+    if n_epochs is None:
+        n_epochs = 10
+    
+    if bs is None:
+        bs = 3
+    
+    if lr is None:
+        lr = 0.001
+    
+    if wts is None:
+        wts = {'style':1e10, 'pixel':0.25, 'content':1e5, 'downscale':1}
+    
+    if save_model_every_X_iterations is None:
+        save_model_every_X_iterations = 100
+    
+    if alpha is None: # scalar by weight to upweight important pixels
+        alpha = 2
+    
+    if alpha_thres is None: # quantile by which to find important pixels (highest 80% of pixels with a high difference between upscaled vs original)
+        alpha_thres = 0.8
+    
+    mse_loss = torch.nn.MSELoss()
+    
+    size_compressed_input = (64,64)
+    
+    # initialize the db loader class
+    db_loader = DataLoaderTransformer(
+        path_db = path_db, #'/tmp/data/', 
+        albumentations_transformations=AlbumentationsTransformations,
+        selectedAttributes=None,
+        size_compressed_input = size_compressed_input)
+    
+    params = HyperParams(params_dict)
+    
+    device = torch.device("cuda" if do_cuda else "cpu")
+        
+    #initialize the VGG pre-trained model for the perceptual losses
+    vgg = Vgg16(requires_grad=False).to(device)
+    
+    # initialize the model
+    if model_type == "ResidUpscale256":
+        net2 = ResidUpscale256(params).to(device)
+    elif model_type == "TransformerNet4":
+        net2 = TransformerNet4(params).to(device)
+    elif model_type == "NetResidUpsample":
+        net2 = NetResidUpsample(params).to(device)
+    else:
+        net2 = ResidUpscale256(params).to(device)
+    
+    optimizer = torch.optim.Adam(net2.parameters(),lr = lr)
+    
+    #save_dir = "models_trained/v2/";
+    if not os.path.isdir(save_dir):
+        os.mkdir(save_dir)
+    
+    epoch = -1
+    
+    if do_reload is None:
+        do_reload = False
+    
+    if do_reload:
+        # check if there is a saved json file with the path to the latest model
+        path_to_lastest_model_json = os.path.join(save_dir, "latest_model.json")
+        if os.path.isfile(path_to_lastest_model_json):
+            with open(path_to_lastest_model_json,'r') as jcon:
+                path_to_reload_model_from_json = json.load(jcon)['path_to_latest_model']
+            
+            if (not path_to_reload_model is None):
+                if (path_to_reload_model_from_json != path_to_reload_model):
+                    print("The reload model (%s) is different from the latest model %s; defaulting to the latest saved" % (path_to_reload_model,path_to_reload_model_from_json))
+            
+            path_to_reload_model = path_to_reload_model_from_json
+        
+        if os.path.isfile(path_to_reload_model):
+            print("reloading model %s" % path_to_reload_model)
+            previous_model_state = torch.load(path_to_reload_model)
+            epoch = previous_model_state['epoch']
+            print("resuming at epoch %d" % epoch)
+            net2.load_state_dict(previous_model_state['model_state_dict'])
+            optimizer = torch.optim.Adam(net2.parameters(),lr = lr)
+            optimizer.load_state_dict(previous_model_state['optimizer_state_dict'])
+        else:
+            print("STARTING FRESH MODEL AT 0")
+    
+    while epoch < n_epochs:
+        epoch+=1
+        db_iter = db_loader.getDBLoader(size=target_size, bs=bs, num_workers = 1, shuffle=True)
+        # loop through the images
+        for bitem, (by_full, blabels) in enumerate(db_iter):
+            
+            # compress the image to 64x64  (serves as the input image
+            bx_comp = db_loader.downscale_fullsize_target_to_small_input(target_images = by_full)
+            # compress the image to 128x127 (serves as another type of downscale loss)
+            by_comp = db_loader.downscale_fullsize_target_to_small_input(size_compressed_input = target_size//2, target_images = by_full)
+            
+            if do_cuda:
+                bx_comp = bx_comp.to(device)
+                by_full = by_full.to(device)
+            
+            optimizer.zero_grad()
+              
+            # get reconstructed image (out) and a downsampled version (out_downsampled)
+            out, out_downsampled = net2(bx_comp)
+            
+            # VGG features: original (by_full) and reconstruction (out)
+            features_style_fullsize = vgg(by_full)
+            features_style_reconstruction = vgg(out)
+            
+            # perceptual loss (vgg)
+            perceptual_loss = mse_loss(features_style_reconstruction.relu2_2, features_style_fullsize.relu2_2)
+            # gram matrices for style loss: style-features for original
+            gram_style_fullsize = [gram_matrix(y) for y in features_style_fullsize]
+            # style of the reconstruction
+            gram_style_reconstruction = [gram_matrix(y) for y in features_style_reconstruction]
+            # style loss
+            bstyle_loss = style_lossf(gram_style_reconstruction, gram_style_fullsize)
+            # pixel loss (downscaled resolution)
+            downscale_loss = mse_loss(out_downsampled, by_comp)
+            
+            # pixel loss (native resolution)
+            weights_pixels = make_edge_sensitive_weights_for_pixel_loss(by_full, bx_comp, alpha = alpha, alpha_thres = alpha_thres)
+            pixel_loss = mse_loss_weighted(out, by_full, weights_pixels)
+            #pixel_loss = mse_loss(out, by_full)
+            
+            (wts['pixel']*pixel_loss + wts['style']*bstyle_loss + wts['content']*perceptual_loss + wts['downscale']*downscale_loss).backward()
+            optimizer.step()
+            
+            if bitem % save_model_every_X_iterations == 0:
+                print("saving model and making a dummy image")
+                path_to_model = "%sstyletransfer_v4_e%d.model" % (save_dir, epoch)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': net2.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'style_loss':bstyle_loss.item(),
+                    'content_loss':perceptual_loss.item(),
+                    'pixel_loss':pixel_loss.item(),
+                    'downscale_loss':downscale_loss.item(),
+                    'lr':lr,
+                    'weights':wts,
+                    'bs':bs,
+                    'params_dict':params_dict},path_to_model)
+                
+                # save the path to the latest model
+                path_to_lastest_model_json = os.path.join(os.path.split(path_to_model)[0],"latest_model.json")
+                with open(path_to_lastest_model_json,'w') as jcon:
+                    json.dump({'path_to_latest_model':path_to_model}, jcon)
+                
+                # plot images
+                save_visualization(by_full, out, vis_path=save_dir, suffix = "E%d" % epoch)
+            
+            if bitem % 10 ==0:
+                print("E%d; STEP%d; style:%0.6f; content:%0.3f; pix:%0.3f; downscale:%0.3f" % (epoch, bitem, bstyle_loss.item(), perceptual_loss.item(), pixel_loss.item(), downscale_loss.item()))
+                if not sleep is None:
+                    time.sleep(sleep)
+        
+        if True:
+            print("saving model and making a dummy image")
+            path_to_model = "%sstyletransfer_v1_e%d.model" % (save_dir, epoch)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': net2.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'style_loss':bstyle_loss.item(),
+                'content_loss':perceptual_loss.item(),
+                'pixel_loss':pixel_loss.item(),
+                'downscale_loss':downscale_loss.item(),                
+                'lr':lr,
+                'weights':wts,
+                'bs':bs,
+                'params_dict':params_dict},path_to_model)
+            
+            # save the path to the latest model
+            path_to_lastest_model_json = os.path.join(os.path.split(path_to_model)[0],"latest_model.json")
+            with open(path_to_lastest_model_json,'w') as jcon:
+                json.dump({'path_to_latest_model':path_to_model}, jcon)
+            
+            # plot images
+            save_visualization(by_full, out, vis_path=save_dir, suffix = "E%d" % epoch)
+            if not sleep is None:
+                time.sleep(5*sleep)
                 
