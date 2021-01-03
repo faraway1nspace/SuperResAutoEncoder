@@ -17,6 +17,8 @@ def mse_loss_weighted(input, target, weights):
 
 def make_edge_sensitive_weights_for_pixel_loss(images_fullsize, images_reduced, alpha = 2, alpha_thres = 0.8):
     """this finds important pixels (at target_size) and provides a weight-matrix to upweight/downweight pixels """
+    #images_fullsize, images_reduced = by_full, bx_comp
+    #alpha = 2; alpha_thres = 0.8
     images_fullsize = images_fullsize.detach().numpy()
     BS,NC,target_size,_ = images_fullsize.shape
     _,_,reduced_size,_ = images_reduced.shape
@@ -24,11 +26,17 @@ def make_edge_sensitive_weights_for_pixel_loss(images_fullsize, images_reduced, 
     # upscale the reduced-image
     images_reduced_upscaled = torch.nn.functional.interpolate(images_reduced, mode='nearest', scale_factor=scale_factor)
     # get the difference between original and the re-upscaled image
-    img_diff = (images_fullsize - images_reduced_upscaled.detach().numpy())**2
+    img_diff_3d = (images_fullsize - images_reduced_upscaled.detach().numpy())**2
+    # sum the differences along the three channels
+    img_diff = img_diff_3d.sum(axis = 1)
     # use quantiles to find the high-priorit edges
     diff_threshold = np.quantile(img_diff, alpha_thres)
+    #foo = 1*(img_diff>diff_threshold)
     # set the important pixels to have 'alpha' times the importance
-    pixel_weights = ((alpha-1)*(img_diff>diff_threshold)+1)
+    pixel_weights1 = ((alpha-1)*(img_diff>diff_threshold)+1)
+    # repeat weights across each channel
+    pixel_weights = pixel_weights1.reshape((BS,1,target_size,target_size))
+    pixel_weights = np.broadcast_to(pixel_weights, (BS,NC, target_size,target_size))
     # reweight so that, overall, the images have the same total-weight as the original image
     total_weight_ratio = float(pixel_weights.sum()/(BS*NC*target_size*target_size))
     pixel_weights = pixel_weights/total_weight_ratio
