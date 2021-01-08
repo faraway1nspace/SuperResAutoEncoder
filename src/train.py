@@ -13,7 +13,7 @@ import random
 
 from utils.utils import rebase_path, make_edge_sensitive_weights_for_pixel_loss, mse_loss_weighted
 from utils.visualize_image import save_visualization
-from utils.image_transform import pil_loader, ToTensorV2
+from utils.image_transform import pil_loader, ToTensorV2, CorruptInputImage
 from attrib_dataset import AttribDataset
 
 import importlib
@@ -564,7 +564,8 @@ def train_4_losses_weighted_pix(params_dict,
                    import_dir = None,
                    save_model_every_X_iterations = None,
                    alpha = None,
-                   alpha_thres = None):
+                   alpha_thres = None,
+                   input_image_prep_parameters = None):
     """ 
     this version of train uses four types of losses:
     - pixel loss at the native resolution (e.g. 512 x 512)
@@ -614,6 +615,10 @@ def train_4_losses_weighted_pix(params_dict,
         selectedAttributes=None,
         size_compressed_input = size_compressed_input)
     
+    # initialize the input image corrupter
+    corrupter = CorruptInputImage(input_image_prep_parameters = input_image_prep_parameters)
+    
+    # initialize the hyperparameters
     params = HyperParams(params_dict)
     
     device = torch.device("cuda" if do_cuda else "cpu")
@@ -676,6 +681,10 @@ def train_4_losses_weighted_pix(params_dict,
             bx_comp = db_loader.downscale_fullsize_target_to_small_input(target_images = by_full)
             # compress the image to 128x127 (serves as another type of downscale loss)
             by_comp = db_loader.downscale_fullsize_target_to_small_input(size_compressed_input = target_size//2, target_images = by_full)
+            # find important pixels in image (edges) to weight the pixel loss-function
+            weights_pixels = make_edge_sensitive_weights_for_pixel_loss(by_full, bx_comp, alpha = alpha, alpha_thres = alpha_thres)
+            # slightly corrupt the input inmage
+            by_comp = corrupter.corrupt_input_image(by_comp)
             
             if do_cuda:
                 bx_comp = bx_comp.to(device)
@@ -701,8 +710,7 @@ def train_4_losses_weighted_pix(params_dict,
             # pixel loss (downscaled resolution)
             downscale_loss = mse_loss(out_downsampled, by_comp)
             
-            # pixel loss (native resolution)
-            weights_pixels = make_edge_sensitive_weights_for_pixel_loss(by_full, bx_comp, alpha = alpha, alpha_thres = alpha_thres)
+            # pixel loss (native resolution)            
             pixel_loss = mse_loss_weighted(out, by_full, weights_pixels)
             #pixel_loss = mse_loss(out, by_full)
             

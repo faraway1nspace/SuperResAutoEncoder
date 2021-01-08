@@ -143,3 +143,15 @@ def standardTransform(size):
                                Transforms.ToTensor(),
                                Transforms.Normalize((0.5, 0.5, 0.5),
                                                     (0.5, 0.5, 0.5))])
+class CorruptInputImage:
+    """ slightly corrupt the input image """
+    def __init__(self, input_image_prep_parameters=None):
+        if input_image_prep_parameters is None:
+            input_image_prep_parameters = {'saturation':0.98, 'contrast':0.98}
+        self.params = input_image_prep_parameters
+        self.adjust_saturation = Transforms.functional.adjust_saturation
+        self.adjust_contrast = Transforms.functional.adjust_contrast
+    
+    def corrupt_input_image(self, img):
+        return self.adjust_saturation(self.adjust_contrast(img, self.params['contrast']), self.params['saturation'])
+
