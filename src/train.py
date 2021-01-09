@@ -109,13 +109,13 @@ class AlbumentationsTransformations(object):
     def __init__(self, size):
         if isinstance(size,int):
             size = (size,size)
-        self.A_Compose = A.Compose([A.ChannelShuffle(always_apply=False, p=0.1),
+        self.A_Compose = A.Compose([A.ChannelShuffle(always_apply=False, p=0.15),
                                     A.RandomGridShuffle(always_apply=False, p=0.05, grid=(2, 2)),
                        A.transforms.GridDistortion(num_steps=5, distort_limit=0.4, p=0.6),
                        A.HorizontalFlip(p=0.5),
                        A.RandomResizedCrop(always_apply=True, p=1.0, height=size[0], width=size[0],
-                                         scale=(0.75, 1),
-                                         ratio=(0.97, 1.03), interpolation=3),#ONLY 3 SEEMS TO WORK
+                                         scale=(0.66, 1),
+                                         ratio=(0.5, 1.5), interpolation=3),#ONLY 3 SEEMS TO WORK
                        A.transforms.ColorJitter(brightness=0.05, contrast=0.07, saturation=0.04, hue=0.08, always_apply=False, p=0.7),#HSV random
                        A.transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)), 
                        ToTensorV2()
